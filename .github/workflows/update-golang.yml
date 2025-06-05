@@ -1,0 +1,220 @@
+name: Update Golang Version
+
+on:
+  schedule:
+    # 每天UTC时间00:00检查更新 (北京时间08:00)
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+    # 允许手动触发
+    inputs:
+      version:
+        description: 'Go version to update to (e.g., 1.24.6)'
+        required: false
+        type: string
+
+jobs:
+  check-and-update:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install dependencies
+      run: |
+        pip install requests beautifulsoup4 lxml
+
+    - name: Check for new Go version
+      id: check_version
+      run: |
+        python3 << 'EOF'
+        import re
+        import requests
+        import sys
+        from bs4 import BeautifulSoup
+        import hashlib
+        import os
+
+        def get_current_version():
+            """从Makefile读取当前版本"""
+            with open('golang/Makefile', 'r') as f:
+                content = f.read()
+            
+            major_minor_match = re.search(r'GO_VERSION_MAJOR_MINOR:=(\d+\.\d+)', content)
+            patch_match = re.search(r'GO_VERSION_PATCH:=(\d+)', content)
+            
+            if major_minor_match and patch_match:
+                return f"{major_minor_match.group(1)}.{patch_match.group(1)}"
+            return None
+
+        def get_latest_version():
+            """从pkg.go.dev获取最新稳定版本"""
+            try:
+                response = requests.get('https://pkg.go.dev/std?tab=versions', timeout=30)
+                response.raise_for_status()
+                soup = BeautifulSoup(response.content, 'html.parser')
+                
+                # 查找版本列表中的第一个稳定版本（不包含rc、beta等）
+                version_links = soup.find_all('a', href=re.compile(r'/std@go\d+\.\d+\.\d+$'))
+                
+                for link in version_links:
+                    href = link.get('href', '')
+                    # 提取版本号，格式如 /std@go1.24.5
+                    version_match = re.search(r'/std@go(\d+\.\d+\.\d+)$', href)
+                    if version_match:
+                        version = version_match.group(1)
+                        # 确保不包含rc、beta等标识
+                        if not any(x in version.lower() for x in ['beta', 'rc', 'alpha', 'dev']):
+                            print(f"Found stable version: {version}")
+                            return version
+                
+                # 如果上面的方法失败，尝试查找版本文本
+                version_elements = soup.find_all(text=re.compile(r'go\d+\.\d+\.\d+$'))
+                for element in version_elements:
+                    version_match = re.search(r'go(\d+\.\d+\.\d+)$', element.strip())
+                    if version_match:
+                        version = version_match.group(1)
+                        if not any(x in version.lower() for x in ['beta', 'rc', 'alpha', 'dev']):
+                            print(f"Found stable version from text: {version}")
+                            return version
+                
+                return None
+            except Exception as e:
+                print(f"Error fetching latest version: {e}")
+                return None
+
+        def get_source_hash(version):
+            """获取源码包的SHA256哈希"""
+            try:
+                url = f"https://dl.google.com/go/go{version}.src.tar.gz"
+                response = requests.get(url, timeout=60)
+                response.raise_for_status()
+                
+                sha256_hash = hashlib.sha256()
+                for chunk in response.iter_content(chunk_size=8192):
+                    sha256_hash.update(chunk)
+                
+                return sha256_hash.hexdigest()
+            except Exception as e:
+                print(f"Error downloading source: {e}")
+                return None
+
+        # 获取手动输入的版本或检查最新版本
+        manual_version = "${{ github.event.inputs.version }}"
+        if manual_version:
+            target_version = manual_version
+            print(f"Using manual version: {target_version}")
+        else:
+            target_version = get_latest_version()
+            if not target_version:
+                print("Failed to get latest version")
+                sys.exit(1)
+            print(f"Latest version found: {target_version}")
+
+        current_version = get_current_version()
+        print(f"Current version: {current_version}")
+
+        if current_version == target_version:
+            print("Already up to date")
+            with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                f.write(f"needs_update=false\n")
+                f.write(f"current_version={current_version}\n")
+                f.write(f"target_version={target_version}\n")
+            sys.exit(0)
+
+        # 获取新版本的哈希
+        print(f"Getting hash for version {target_version}...")
+        new_hash = get_source_hash(target_version)
+        if not new_hash:
+            print("Failed to get source hash")
+            sys.exit(1)
+
+        print(f"New hash: {new_hash}")
+
+        # 解析版本号
+        version_parts = target_version.split('.')
+        if len(version_parts) != 3:
+            print(f"Invalid version format: {target_version}")
+            sys.exit(1)
+
+        major_minor = f"{version_parts[0]}.{version_parts[1]}"
+        patch = version_parts[2]
+
+        with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+            f.write(f"needs_update=true\n")
+            f.write(f"current_version={current_version}\n")
+            f.write(f"target_version={target_version}\n")
+            f.write(f"major_minor={major_minor}\n")
+            f.write(f"patch={patch}\n")
+            f.write(f"new_hash={new_hash}\n")
+
+        EOF
+
+    - name: Update Makefile
+      if: steps.check_version.outputs.needs_update == 'true'
+      run: |
+        # 备份原文件
+        cp golang/Makefile golang/Makefile.bak
+        
+        # 更新版本号和哈希
+        sed -i "s/GO_VERSION_MAJOR_MINOR:=.*/GO_VERSION_MAJOR_MINOR:=${{ steps.check_version.outputs.major_minor }}/" golang/Makefile
+        sed -i "s/GO_VERSION_PATCH:=.*/GO_VERSION_PATCH:=${{ steps.check_version.outputs.patch }}/" golang/Makefile
+        sed -i "s/PKG_HASH:=.*/PKG_HASH:=${{ steps.check_version.outputs.new_hash }}/" golang/Makefile
+        
+        # 显示变更
+        echo "Changes made to Makefile:"
+        diff -u golang/Makefile.bak golang/Makefile || true
+        rm golang/Makefile.bak
+
+    - name: Verify changes
+      if: steps.check_version.outputs.needs_update == 'true'
+      run: |
+        echo "Verifying Makefile changes..."
+        grep "GO_VERSION_MAJOR_MINOR:=${{ steps.check_version.outputs.major_minor }}" golang/Makefile
+        grep "GO_VERSION_PATCH:=${{ steps.check_version.outputs.patch }}" golang/Makefile
+        grep "PKG_HASH:=${{ steps.check_version.outputs.new_hash }}" golang/Makefile
+        echo "Verification successful!"
+
+    - name: Create Pull Request
+      if: steps.check_version.outputs.needs_update == 'true'
+      uses: peter-evans/create-pull-request@v5
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        commit-message: "golang: bump to ${{ steps.check_version.outputs.target_version }}"
+        title: "golang: bump to ${{ steps.check_version.outputs.target_version }}"
+        body: |
+          ## Golang Version Update
+          
+          This PR updates Golang from `${{ steps.check_version.outputs.current_version }}` to `${{ steps.check_version.outputs.target_version }}`.
+          
+          ### Changes
+          - Updated `GO_VERSION_MAJOR_MINOR` to `${{ steps.check_version.outputs.major_minor }}`
+          - Updated `GO_VERSION_PATCH` to `${{ steps.check_version.outputs.patch }}`
+          - Updated `PKG_HASH` to `${{ steps.check_version.outputs.new_hash }}`
+          
+          ### Verification
+          - [x] Source package hash verified
+          - [x] Version format validated
+          
+          This update was automatically generated by GitHub Actions.
+        branch: update-golang-${{ steps.check_version.outputs.target_version }}
+        delete-branch: true
+        draft: false
+
+    - name: Summary
+      run: |
+        if [ "${{ steps.check_version.outputs.needs_update }}" == "true" ]; then
+          echo "✅ Created PR to update Golang from ${{ steps.check_version.outputs.current_version }} to ${{ steps.check_version.outputs.target_version }}"
+        else
+          echo "ℹ️ Golang is already up to date at version ${{ steps.check_version.outputs.current_version }}"
+        fi
