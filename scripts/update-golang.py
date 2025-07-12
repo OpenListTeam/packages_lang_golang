@@ -8,7 +8,7 @@ Golang版本更新脚本
     
 示例:
     python3 update-golang.py 1.24.6  # 更新到指定版本
-    python3 update-golang.py          # 更新到最新版本
+    python3 update-golang.py          # 更新到当前分支对应大版本的最新patch版本
 """
 
 import re
@@ -18,6 +18,7 @@ import hashlib
 import os
 from bs4 import BeautifulSoup
 import argparse
+import subprocess
 
 def get_current_version():
     """从Makefile读取当前版本"""
@@ -36,48 +37,93 @@ def get_current_version():
         return f"{major_minor_match.group(1)}.{patch_match.group(1)}"
     return None
 
-def get_latest_version():
-    """从pkg.go.dev获取最新稳定版本"""
+def get_branch_major_minor():
+    """从当前分支名获取目标大版本号"""
     try:
-        print("正在从pkg.go.dev获取最新Go版本...")
+        # 获取当前分支名
+        result = subprocess.run(['git', 'branch', '--show-current'], 
+                              capture_output=True, text=True, check=True)
+        branch_name = result.stdout.strip()
+        print(f"当前分支: {branch_name}")
+        
+        # 从分支名提取版本号，如 24.x -> 1.24
+        if branch_name.endswith('.x'):
+            minor_version = branch_name[:-2]  # 移除 .x
+            major_minor = f"1.{minor_version}"
+            print(f"目标大版本: {major_minor}")
+            return major_minor
+        else:
+            print(f"分支名 {branch_name} 不符合预期格式 (XX.x)")
+            return None
+    except Exception as e:
+        print(f"获取分支信息失败: {e}")
+        return None
+
+def get_latest_patch_version(target_major_minor):
+    """从pkg.go.dev获取指定大版本的最新patch版本"""
+    try:
+        print(f"正在查找 {target_major_minor} 的最新patch版本...")
         response = requests.get('https://pkg.go.dev/std?tab=versions', timeout=30)
         response.raise_for_status()
         soup = BeautifulSoup(response.content, 'html.parser')
         
-        # 查找版本列表中的第一个稳定版本（不包含rc、beta等）
-        version_links = soup.find_all('a', href=re.compile(r'/std@go\d+\.\d+\.\d+$'))
+        # 查找指定大版本的所有patch版本
+        version_pattern = re.compile(rf'/std@go{re.escape(target_major_minor)}\.\d+$')
+        version_links = soup.find_all('a', href=version_pattern)
+        
+        latest_patch = 0
+        latest_version = None
         
         for link in version_links:
             href = link.get('href', '')
             # 提取版本号，格式如 /std@go1.24.5
-            version_match = re.search(r'/std@go(\d+\.\d+\.\d+)$', href)
+            version_match = re.search(rf'/std@go({re.escape(target_major_minor)}\.(\d+))$', href)
             if version_match:
-                version = version_match.group(1)
+                full_version = version_match.group(1)
+                patch_version = int(version_match.group(2))
+                
                 # 确保不包含rc、beta等标识
-                if not any(x in version.lower() for x in ['beta', 'rc', 'alpha', 'dev']):
-                    print(f"找到稳定版本: {version}")
-                    return version
+                if not any(x in full_version.lower() for x in ['beta', 'rc', 'alpha', 'dev']):
+                    if patch_version > latest_patch:
+                        latest_patch = patch_version
+                        latest_version = full_version
+                        print(f"找到patch版本: {full_version}")
+        
+        if latest_version:
+            print(f"{target_major_minor} 的最新patch版本: {latest_version}")
+            return latest_version
         
         # 如果上面的方法失败，尝试查找版本文本
         print("尝试备用方法查找版本...")
-        version_elements = soup.find_all(text=re.compile(r'go\d+\.\d+\.\d+$'))
-        for element in version_elements:
-            version_match = re.search(r'go(\d+\.\d+\.\d+)$', element.strip())
-            if version_match:
-                version = version_match.group(1)
-                if not any(x in version.lower() for x in ['beta', 'rc', 'alpha', 'dev']):
-                    print(f"从文本中找到稳定版本: {version}")
-                    return version
+        version_elements = soup.find_all(text=re.compile(rf'go{re.escape(target_major_minor)}\.\d+$'))
         
-        return None
+        for element in version_elements:
+            version_match = re.search(rf'go({re.escape(target_major_minor)}\.(\d+))$', element.strip())
+            if version_match:
+                full_version = version_match.group(1)
+                patch_version = int(version_match.group(2))
+                
+                if not any(x in full_version.lower() for x in ['beta', 'rc', 'alpha', 'dev']):
+                    if patch_version > latest_patch:
+                        latest_patch = patch_version
+                        latest_version = full_version
+                        print(f"从文本中找到patch版本: {full_version}")
+        
+        if latest_version:
+            print(f"{target_major_minor} 的最新patch版本: {latest_version}")
+            return latest_version
+        else:
+            print(f"未找到 {target_major_minor} 的patch版本")
+            return None
+            
     except Exception as e:
-        print(f"获取最新版本失败: {e}")
+        print(f"获取最新patch版本失败: {e}")
         return None
 
 def get_source_hash(version):
     """获取源码包的SHA256哈希"""
     try:
-        print(f"正在下载Go {version}源码包以计算哈希...")
+        print(f"正在下载Go {version}源码包以计��哈希...")
         url = f"https://dl.google.com/go/go{version}.src.tar.gz"
         response = requests.get(url, timeout=120)
         response.raise_for_status()
@@ -153,11 +199,18 @@ def main():
             target_version = args.version
             print(f"目标版本: {target_version} (手动指定)")
         else:
-            target_version = get_latest_version()
-            if not target_version:
-                print("无法获取最新版本")
+            # 获取当前分支对应的大版本号
+            target_major_minor = get_branch_major_minor()
+            if not target_major_minor:
+                print("无法从分支名确定目标大版本")
                 return 1
-            print(f"目标版本: {target_version} (最新版本)")
+            
+            # 获取该大版本的最新patch版本
+            target_version = get_latest_patch_version(target_major_minor)
+            if not target_version:
+                print(f"无法获取 {target_major_minor} 的最新patch版本")
+                return 1
+            print(f"目标版本: {target_version} (分支 {target_major_minor} 的最新patch版本)")
         
         # 检查是否需要更新
         if current_version == target_version:
