@@ -31,10 +31,17 @@ def get_current_version():
         content = f.read()
     
     major_minor_match = re.search(r'GO_VERSION_MAJOR_MINOR:=(\d+\.\d+)', content)
-    patch_match = re.search(r'GO_VERSION_PATCH:=(\d+)', content)
+    patch_match = re.search(r'GO_VERSION_PATCH:=(.+)', content)
     
     if major_minor_match and patch_match:
-        return f"{major_minor_match.group(1)}.{patch_match.group(1)}"
+        major_minor = major_minor_match.group(1)
+        patch = patch_match.group(1)
+        
+        # 处理预发布版本格式
+        if 'rc' in patch or 'beta' in patch:
+            return f"{major_minor}{patch}"
+        else:
+            return f"{major_minor}.{patch}"
     return None
 
 def get_branch_major_minor():
@@ -72,10 +79,10 @@ def get_latest_patch_version(target_major_minor):
         if allow_prerelease:
             print("检测到1.25分支 - 允许beta/rc版本")
         
-        # 查找指定大版本的所有版本（包括预发布版本）
+        # 查找指定大版本的所有版本
         if allow_prerelease:
-            # 1.25版本：匹配 1.25.0-beta1, 1.25.0-rc1, 1.25.1 等
-            version_pattern = re.compile(rf'/std@go{re.escape(target_major_minor)}\.\d+(?:-(?:beta|rc)\d*)?$')
+            # 1.25版本：匹配 go1.25beta1, go1.25rc2, go1.25, go1.25.1 等
+            version_pattern = re.compile(rf'/std@go{re.escape(target_major_minor)}(?:(?:beta|rc)\d+|\.\d+)?$')
         else:
             # 其他版本：只匹配稳定版本
             version_pattern = re.compile(rf'/std@go{re.escape(target_major_minor)}\.\d+$')
@@ -84,50 +91,53 @@ def get_latest_patch_version(target_major_minor):
         
         latest_patch = 0
         latest_version = None
-        latest_prerelease_priority = 999  # 999=beta, 1=rc, 0=stable
+        latest_prerelease_priority = 999  # 0=stable, 1=rc, 999=beta
+        latest_prerelease_num = 0
         
         for link in version_links:
             href = link.get('href', '')
             
             if allow_prerelease:
-                # 1.25版本：匹配预发布版本
-                version_match = re.search(rf'/std@go({re.escape(target_major_minor)}\.(\d+)(?:-(beta|rc)(\d*))?)', href)
+                # 1.25版本：匹配 go1.25beta1, go1.25rc2, go1.25, go1.25.1
+                version_match = re.search(rf'/std@go({re.escape(target_major_minor)}(?:(beta|rc)(\d+)|\.(\d+)|$))', href)
                 if version_match:
                     full_version = version_match.group(1)
-                    patch_version = int(version_match.group(2))
-                    prerelease_type = version_match.group(3)  # beta, rc, or None
-                    prerelease_num = int(version_match.group(4) or "1")  # 预发布版本号
+                    prerelease_type = version_match.group(2)  # beta, rc, or None
+                    prerelease_num = int(version_match.group(3) or "0")  # 预发布版本号
+                    patch_version = int(version_match.group(4) or "0")  # patch版本号
                     
                     # 计算优先级：stable(0) > rc(1) > beta(999)
                     if prerelease_type is None:
                         prerelease_priority = 0  # stable
+                        effective_patch = patch_version
                     elif prerelease_type == 'rc':
                         prerelease_priority = 1  # rc
+                        effective_patch = 0  # rc versions are for base version
                     elif prerelease_type == 'beta':
                         prerelease_priority = 999  # beta
+                        effective_patch = 0  # beta versions are for base version
                     else:
                         continue
                     
-                    # 比较版本：先比较patch版本，再比较预发布优先级
+                    # 比较版本：先比较patch版本，再比较预发布优先级，最后比较预发布版本号
                     is_newer = False
-                    if patch_version > latest_patch:
+                    if effective_patch > latest_patch:
                         is_newer = True
-                    elif patch_version == latest_patch:
-                        # 同一个patch版本，比较预发布优先级（数字越小优先级越高）
+                    elif effective_patch == latest_patch:
                         if prerelease_priority < latest_prerelease_priority:
                             is_newer = True
-                        elif prerelease_priority == latest_prerelease_priority and prerelease_type:
-                            # 同类型预发布版本，比较版本号
-                            current_prerelease_num = 1
-                            if latest_version and '-' in latest_version:
-                                current_prerelease_num = int(re.search(r'(\d+)$', latest_version.split('-')[-1]).group(1) or "1")
-                            if prerelease_num > current_prerelease_num:
+                        elif prerelease_priority == latest_prerelease_priority:
+                            if prerelease_type and prerelease_num > latest_prerelease_num:
                                 is_newer = True
+                            elif not prerelease_type and not latest_version.endswith(('beta', 'rc')):
+                                # Both are stable versions, already handled by patch comparison
+                                pass
                     
                     if is_newer:
-                        latest_patch = patch_version
+                        latest_patch = effective_patch
                         latest_version = full_version
                         latest_prerelease_priority = prerelease_priority
+                        latest_prerelease_num = prerelease_num
                         print(f"找到版本: {full_version}")
             else:
                 # 其他版本：只匹配稳定版本
@@ -150,39 +160,46 @@ def get_latest_patch_version(target_major_minor):
         # 如果上面的方法失败，尝试查找版本文本
         print("尝试备用方法查找版本...")
         if allow_prerelease:
-            version_elements = soup.find_all(text=re.compile(rf'go{re.escape(target_major_minor)}\.\d+(?:-(?:beta|rc)\d*)?$'))
+            version_elements = soup.find_all(text=re.compile(rf'go{re.escape(target_major_minor)}(?:(?:beta|rc)\d+|\.\d+)?$'))
         else:
             version_elements = soup.find_all(text=re.compile(rf'go{re.escape(target_major_minor)}\.\d+$'))
         
         for element in version_elements:
             if allow_prerelease:
-                version_match = re.search(rf'go({re.escape(target_major_minor)}\.(\d+)(?:-(beta|rc)(\d*))?)', element.strip())
+                version_match = re.search(rf'go({re.escape(target_major_minor)}(?:(beta|rc)(\d+)|\.(\d+)|$))', element.strip())
                 if version_match:
                     full_version = version_match.group(1)
-                    patch_version = int(version_match.group(2))
-                    prerelease_type = version_match.group(3)
-                    prerelease_num = int(version_match.group(4) or "1")
+                    prerelease_type = version_match.group(2)
+                    prerelease_num = int(version_match.group(3) or "0")
+                    patch_version = int(version_match.group(4) or "0")
                     
                     # 使用相同的比较逻辑
                     if prerelease_type is None:
                         prerelease_priority = 0
+                        effective_patch = patch_version
                     elif prerelease_type == 'rc':
                         prerelease_priority = 1
+                        effective_patch = 0
                     elif prerelease_type == 'beta':
                         prerelease_priority = 999
+                        effective_patch = 0
                     else:
                         continue
                     
                     is_newer = False
-                    if patch_version > latest_patch:
+                    if effective_patch > latest_patch:
                         is_newer = True
-                    elif patch_version == latest_patch and prerelease_priority < latest_prerelease_priority:
-                        is_newer = True
+                    elif effective_patch == latest_patch:
+                        if prerelease_priority < latest_prerelease_priority:
+                            is_newer = True
+                        elif prerelease_priority == latest_prerelease_priority and prerelease_type and prerelease_num > latest_prerelease_num:
+                            is_newer = True
                     
                     if is_newer:
-                        latest_patch = patch_version
+                        latest_patch = effective_patch
                         latest_version = full_version
                         latest_prerelease_priority = prerelease_priority
+                        latest_prerelease_num = prerelease_num
                         print(f"从文本中找到版本: {full_version}")
             else:
                 version_match = re.search(rf'go({re.escape(target_major_minor)}\.(\d+))$', element.strip())
@@ -234,13 +251,22 @@ def update_makefile(target_version, new_hash):
     """更新Makefile"""
     makefile_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'golang', 'Makefile')
     
-    # 解析版本号
-    version_parts = target_version.split('.')
-    if len(version_parts) != 3:
-        raise ValueError(f"无效的版本格式: {target_version}")
-    
-    major_minor = f"{version_parts[0]}.{version_parts[1]}"
-    patch = version_parts[2]
+    # 解析版本号用于Makefile更新
+    if 'rc' in target_version or 'beta' in target_version:
+        # 预发布版本：1.25rc2 -> major_minor=1.25, patch=rc2
+        version_match = re.match(r'(\d+\.\d+)(.+)', target_version)
+        if version_match:
+            major_minor = version_match.group(1)
+            patch = version_match.group(2)
+        else:
+            raise ValueError(f"无效的预发布版本格式: {target_version}")
+    else:
+        # 稳定版本：1.25.1 -> major_minor=1.25, patch=1
+        version_parts = target_version.split('.')
+        if len(version_parts) != 3:
+            raise ValueError(f"无效的版本格式: {target_version}")
+        major_minor = f"{version_parts[0]}.{version_parts[1]}"
+        patch = version_parts[2]
     
     # 读取原文件
     with open(makefile_path, 'r') as f:
@@ -268,7 +294,7 @@ def update_makefile(target_version, new_hash):
 
 def main():
     parser = argparse.ArgumentParser(description='更新Golang版本')
-    parser.add_argument('version', nargs='?', help='目标版本 (例如: 1.24.6)')
+    parser.add_argument('version', nargs='?', help='目标版本 (��如: 1.24.6)')
     parser.add_argument('--dry-run', action='store_true', help='仅显示将要进行的更改，不实际修改文件')
     args = parser.parse_args()
     
@@ -314,9 +340,23 @@ def main():
         
         if args.dry_run:
             print("\n[DRY RUN] 将要进行的更改:")
-            version_parts = target_version.split('.')
-            major_minor = f"{version_parts[0]}.{version_parts[1]}"
-            patch = version_parts[2]
+            # 解析版本号用于显示
+            if 'rc' in target_version or 'beta' in target_version:
+                version_match = re.match(r'(\d+\.\d+)(.+)', target_version)
+                if version_match:
+                    major_minor = version_match.group(1)
+                    patch = version_match.group(2)
+                else:
+                    print(f"无效的预发布版本格式: {target_version}")
+                    return 1
+            else:
+                version_parts = target_version.split('.')
+                if len(version_parts) != 3:
+                    print(f"无效的版本格式: {target_version}")
+                    return 1
+                major_minor = f"{version_parts[0]}.{version_parts[1]}"
+                patch = version_parts[2]
+            
             print(f"  GO_VERSION_MAJOR_MINOR: {major_minor}")
             print(f"  GO_VERSION_PATCH: {patch}")
             print(f"  PKG_HASH: {new_hash}")
@@ -325,7 +365,7 @@ def main():
         
         # 更新Makefile
         update_makefile(target_version, new_hash)
-        print(f"\n✅ 成功更新Golang从 {current_version} 到 {target_version}")
+        print(f"\n✅ 成功更新Golang��� {current_version} 到 {target_version}")
         
         return 0
         
