@@ -65,18 +65,20 @@ jobs:
             with open('golang/Makefile', 'r') as f:
                 content = f.read()
             
-            major_minor_match = re.search(r'GO_VERSION_MAJOR_MINOR:=(\d+\.\d+)', content)
+            major_minor_match = re.search(r'GO_VERSION_MAJOR_MINOR:=(.+)', content)
             patch_match = re.search(r'GO_VERSION_PATCH:=(.+)', content)
             
             if major_minor_match and patch_match:
                 major_minor = major_minor_match.group(1)
                 patch = patch_match.group(1)
                 
-                # 处理预发布版本格式
-                if 'rc' in patch or 'beta' in patch:
-                    return f"{major_minor}{patch}"
-                else:
+                # 处理预发布版本格式（RC版本的完整版本号在major_minor中）
+                if 'rc' in major_minor or 'beta' in major_minor:
+                    return major_minor
+                elif patch:
                     return f"{major_minor}.{patch}"
+                else:
+                    return major_minor
             return None
 
         def get_branch_major_minor():
@@ -316,14 +318,9 @@ jobs:
 
         # 解析版本号用于Makefile更新
         if 'rc' in target_version or 'beta' in target_version:
-            # 预发布版本：1.25rc2 -> major_minor=1.25, patch=rc2
-            version_match = re.match(r'(\d+\.\d+)(.+)', target_version)
-            if version_match:
-                major_minor = version_match.group(1)
-                patch = version_match.group(2)
-            else:
-                print(f"Invalid prerelease version format: {target_version}")
-                sys.exit(1)
+            # 预发布版本：1.25rc2 -> major_minor=1.25rc2, patch=""
+            major_minor = target_version
+            patch = ""
         else:
             # 稳定版本：1.25.1 -> major_minor=1.25, patch=1
             version_parts = target_version.split('.')
