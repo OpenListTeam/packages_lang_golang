@@ -62,24 +62,44 @@ jobs:
 
         def get_current_version():
             """从Makefile读取当前版本"""
-            with open('golang/Makefile', 'r') as f:
-                content = f.read()
-            
-            major_minor_match = re.search(r'GO_VERSION_MAJOR_MINOR:=(.+)', content)
-            patch_match = re.search(r'GO_VERSION_PATCH:=(.+)', content)
-            
-            if major_minor_match and patch_match:
-                major_minor = major_minor_match.group(1)
-                patch = patch_match.group(1)
+            try:
+                with open('golang/Makefile', 'r') as f:
+                    content = f.read()
                 
-                # 处理预发布版本格式（RC版本的完整版本号在major_minor中）
-                if 'rc' in major_minor or 'beta' in major_minor:
-                    return major_minor
-                elif patch:
-                    return f"{major_minor}.{patch}"
+                major_minor_match = re.search(r'GO_VERSION_MAJOR_MINOR:=(.+)', content)
+                patch_match = re.search(r'GO_VERSION_PATCH:=(.+)', content)
+                
+                if major_minor_match:
+                    major_minor = major_minor_match.group(1).strip()
+                    # 处理patch可能为空的情况
+                    patch = ""
+                    if patch_match:
+                        patch_value = patch_match.group(1).strip()
+                        # 只有当patch不为空时才使用
+                        if patch_value:
+                            patch = patch_value
+                    
+                    print(f"Found major_minor: '{major_minor}', patch: '{patch}'")
+                    
+                    # 处理预发布版本格式（RC/beta版本的完整版本号在major_minor中）
+                    if 'rc' in major_minor.lower() or 'beta' in major_minor.lower():
+                        # 预发布版本：1.25rc2, 1.25beta1 等
+                        return major_minor
+                    elif patch:
+                        # 稳定版本：1.24.5 等
+                        return f"{major_minor}.{patch}"
+                    else:
+                        # 基础版本：1.25 等（没有patch）
+                        return major_minor
                 else:
-                    return major_minor
-            return None
+                    print("Could not find GO_VERSION_MAJOR_MINOR in Makefile")
+                    return None
+            except FileNotFoundError:
+                print("golang/Makefile not found")
+                return None
+            except Exception as e:
+                print(f"Error reading Makefile: {e}")
+                return None
 
         def get_branch_major_minor():
             """从当前分支名获取目标大版本号"""
