@@ -4,7 +4,7 @@ config GOLANG_EXTERNAL_BOOTSTRAP_ROOT
 	string "External bootstrap Go root directory"
 	default ""
 	help
-	  Path to a working Go tree (>= Go 1.4), with bin, pkg, and src
+	  Path to a working Go tree (>= Go 1.24.6), with bin, pkg, and src
 	  subdirectories and the Go compiler at bin/go.
 
 	  If specified, the existing Go installation will be used to
